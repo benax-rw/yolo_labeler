@@ -1,21 +1,13 @@
 #!/usr/bin/env python3
 """
-02_label_images.py
+01_label_images.py
 
 Water Meter YOLO Labeler
-
-Features:
-- Student-friendly folder picker
-- Draw YOLO boxes
-- Select boxes by clicking inside them
-- Move boxes by dragging their border
-- Resize boxes using corner handles
-- Rotate images before labeling
-- Save YOLO labels
 """
 
 import os
 import sys
+import shutil
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
@@ -27,7 +19,6 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QLabel,
     QMainWindow,
-    QMessageBox,
     QPushButton,
     QHBoxLayout,
     QVBoxLayout,
@@ -35,24 +26,12 @@ from PySide6.QtWidgets import (
     QSizePolicy,
     QInputDialog,
     QDialog,
-    QListWidget,
-    QListWidgetItem,
 )
 
 
 CLASS_NAMES = [
-    "meter",
-    "window",
-    "0",
-    "1",
-    "2",
-    "3",
-    "4",
-    "5",
-    "6",
-    "7",
-    "8",
-    "9",
+    "meter", "window",
+    "0", "1", "2", "3", "4", "5", "6", "7", "8", "9",
     "unknown",
 ]
 
@@ -73,191 +52,119 @@ CLASS_COLORS = {
 }
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
+
 HANDLE_SIZE = 10
 MIN_BOX_SIZE = 5
 
 
 def list_image_files(folder: str) -> List[str]:
-    return sorted(
-        [
-            f for f in os.listdir(folder)
-            if os.path.isfile(os.path.join(folder, f))
-            and os.path.splitext(f)[1].lower() in IMAGE_EXTENSIONS
-        ]
-    )
+    return sorted([
+        f for f in os.listdir(folder)
+        if os.path.isfile(os.path.join(folder, f))
+        and os.path.splitext(f)[1].lower() in IMAGE_EXTENSIONS
+    ])
 
 
-def list_subfolders(folder: str) -> List[str]:
-    return sorted(
-        [
-            f for f in os.listdir(folder)
-            if os.path.isdir(os.path.join(folder, f))
-            and not f.startswith(".")
-        ]
-    )
+def unique_destination_path(destination_path: str) -> str:
+    if not os.path.exists(destination_path):
+        return destination_path
+
+    folder = os.path.dirname(destination_path)
+    filename = os.path.basename(destination_path)
+    stem, ext = os.path.splitext(filename)
+
+    counter = 1
+
+    while True:
+        new_path = os.path.join(folder, f"{stem}_removed_{counter}{ext}")
+        if not os.path.exists(new_path):
+            return new_path
+        counter += 1
 
 
-def rotate_image_keep_all(image, angle_degrees: float):
+def rotate_image_keep_size_crop_edges(image, angle_degrees: float):
     h, w = image.shape[:2]
     center = (w / 2.0, h / 2.0)
 
     matrix = cv2.getRotationMatrix2D(center, angle_degrees, 1.0)
 
-    cos = abs(matrix[0, 0])
-    sin = abs(matrix[0, 1])
-
-    new_w = int((h * sin) + (w * cos))
-    new_h = int((h * cos) + (w * sin))
-
-    matrix[0, 2] += (new_w / 2.0) - center[0]
-    matrix[1, 2] += (new_h / 2.0) - center[1]
-
     return cv2.warpAffine(
         image,
         matrix,
-        (new_w, new_h),
+        (w, h),
         flags=cv2.INTER_LINEAR,
         borderMode=cv2.BORDER_CONSTANT,
         borderValue=(0, 0, 0),
     )
 
 
-class LeafFolderDialog(QDialog):
-    """
-    Folder picker that behaves nicely for students.
+def crop_image(image, x1, y1, x2, y2):
+    h, w = image.shape[:2]
 
-    - If a folder has subfolders, double-click opens it.
-    - If a folder has no subfolders, it can be selected.
-    """
+    x_min = int(max(0, min(x1, x2)))
+    y_min = int(max(0, min(y1, y2)))
+    x_max = int(min(w, max(x1, x2)))
+    y_max = int(min(h, max(y1, y2)))
 
-    def __init__(self, start_folder: str, parent=None):
-        super().__init__(parent)
+    if x_max <= x_min or y_max <= y_min:
+        return None
 
-        self.setWindowTitle("Open Image Folder")
-        self.resize(700, 500)
+    return image[y_min:y_max, x_min:x_max]
 
-        self.current_folder = os.path.abspath(start_folder)
-        self.selected_folder: Optional[str] = None
 
-        self.path_label = QLabel()
-        self.path_label.setWordWrap(True)
+def safe_message(parent, title: str, message: str, button_text: str = "OK") -> None:
+    dialog = QDialog(parent)
+    dialog.setWindowTitle(title)
+    dialog.setModal(True)
+    dialog.resize(520, 170)
 
-        self.help_label = QLabel()
-        self.help_label.setWordWrap(True)
+    label = QLabel(message)
+    label.setWordWrap(True)
 
-        self.folder_list = QListWidget()
-        self.folder_list.itemDoubleClicked.connect(self.handle_double_click)
+    ok_btn = QPushButton(button_text)
+    ok_btn.clicked.connect(dialog.accept)
 
-        up_btn = QPushButton("Up")
-        up_btn.clicked.connect(self.go_up)
+    buttons = QHBoxLayout()
+    buttons.addStretch()
+    buttons.addWidget(ok_btn)
 
-        browse_btn = QPushButton("Browse...")
-        browse_btn.clicked.connect(self.browse_anywhere)
+    layout = QVBoxLayout()
+    layout.addWidget(label)
+    layout.addStretch()
+    layout.addLayout(buttons)
 
-        self.select_btn = QPushButton("Use This Folder")
-        self.select_btn.clicked.connect(self.use_current_folder)
+    dialog.setLayout(layout)
+    dialog.exec()
 
-        cancel_btn = QPushButton("Cancel")
-        cancel_btn.clicked.connect(self.reject)
 
-        top = QHBoxLayout()
-        top.addWidget(up_btn)
-        top.addWidget(browse_btn)
-        top.addStretch()
+def safe_confirm(parent, title: str, message: str, yes_text: str = "Yes", no_text: str = "Cancel") -> bool:
+    dialog = QDialog(parent)
+    dialog.setWindowTitle(title)
+    dialog.setModal(True)
+    dialog.resize(560, 200)
 
-        bottom = QHBoxLayout()
-        bottom.addStretch()
-        bottom.addWidget(self.select_btn)
-        bottom.addWidget(cancel_btn)
+    label = QLabel(message)
+    label.setWordWrap(True)
 
-        layout = QVBoxLayout()
-        layout.addLayout(top)
-        layout.addWidget(self.path_label)
-        layout.addWidget(self.help_label)
-        layout.addWidget(self.folder_list, stretch=1)
-        layout.addLayout(bottom)
+    yes_btn = QPushButton(yes_text)
+    no_btn = QPushButton(no_text)
 
-        self.setLayout(layout)
-        self.refresh()
+    yes_btn.clicked.connect(dialog.accept)
+    no_btn.clicked.connect(dialog.reject)
 
-    def refresh(self):
-        self.folder_list.clear()
+    buttons = QHBoxLayout()
+    buttons.addStretch()
+    buttons.addWidget(yes_btn)
+    buttons.addWidget(no_btn)
 
-        subfolders = list_subfolders(self.current_folder)
-        images = list_image_files(self.current_folder)
+    layout = QVBoxLayout()
+    layout.addWidget(label)
+    layout.addStretch()
+    layout.addLayout(buttons)
 
-        self.path_label.setText(f"Current folder:\n{self.current_folder}")
+    dialog.setLayout(layout)
 
-        if subfolders:
-            self.help_label.setText(
-                f"This folder contains {len(subfolders)} subfolder(s). "
-                f"Double-click a folder to open it."
-            )
-            self.select_btn.setEnabled(False)
-        else:
-            self.help_label.setText(
-                f"No subfolders found here. "
-                f"This folder contains {len(images)} supported image(s). "
-                f"You may use this folder."
-            )
-            self.select_btn.setEnabled(True)
-
-        for name in subfolders:
-            child_path = os.path.join(self.current_folder, name)
-            child_subfolders = list_subfolders(child_path)
-            child_images = list_image_files(child_path)
-
-            if child_subfolders:
-                text = f"📁 {name}    ({len(child_subfolders)} subfolders)"
-            else:
-                text = f"📁 {name}    ({len(child_images)} images)"
-
-            item = QListWidgetItem(text)
-            item.setData(Qt.UserRole, child_path)
-            self.folder_list.addItem(item)
-
-    def handle_double_click(self, item: QListWidgetItem):
-        folder = item.data(Qt.UserRole)
-        if folder and os.path.isdir(folder):
-            self.current_folder = folder
-            self.refresh()
-
-    def go_up(self):
-        parent = os.path.dirname(self.current_folder)
-        if parent and parent != self.current_folder:
-            self.current_folder = parent
-            self.refresh()
-
-    def browse_anywhere(self):
-        folder = QFileDialog.getExistingDirectory(
-            self,
-            "Choose Starting Folder",
-            self.current_folder,
-        )
-
-        if folder:
-            self.current_folder = folder
-            self.refresh()
-
-    def use_current_folder(self):
-        subfolders = list_subfolders(self.current_folder)
-
-        if subfolders:
-            return
-
-        images = list_image_files(self.current_folder)
-
-        if not images:
-            QMessageBox.information(
-                self,
-                "No Images Here",
-                "This final folder has no supported images.\n\n"
-                "Please go up and choose another final folder.",
-            )
-            return
-
-        self.selected_folder = self.current_folder
-        self.accept()
+    return dialog.exec() == QDialog.Accepted
 
 
 @dataclass
@@ -285,15 +192,7 @@ class Box:
         return x_center, y_center, width, height
 
     @staticmethod
-    def from_normalized(
-        class_id: int,
-        x_center: float,
-        y_center: float,
-        width: float,
-        height: float,
-        img_w: int,
-        img_h: int,
-    ) -> "Box":
+    def from_normalized(class_id, x_center, y_center, width, height, img_w, img_h) -> "Box":
         bw = width * img_w
         bh = height * img_h
         cx = x_center * img_w
@@ -307,11 +206,7 @@ class Box:
             cy + bh / 2.0,
         )
 
-    def contains(self, x: float, y: float) -> bool:
-        x_min, y_min, x_max, y_max = self.rect()
-        return x_min <= x <= x_max and y_min <= y <= y_max
-
-    def rect(self) -> Tuple[float, float, float, float]:
+    def rect(self):
         return (
             min(self.x1, self.x2),
             min(self.y1, self.y2),
@@ -319,16 +214,20 @@ class Box:
             max(self.y1, self.y2),
         )
 
-    def width(self) -> float:
+    def contains(self, x, y) -> bool:
+        x_min, y_min, x_max, y_max = self.rect()
+        return x_min <= x <= x_max and y_min <= y <= y_max
+
+    def width(self):
         return abs(self.x2 - self.x1)
 
-    def height(self) -> float:
+    def height(self):
         return abs(self.y2 - self.y1)
 
     def is_too_small(self, min_size: int = MIN_BOX_SIZE) -> bool:
         return self.width() < min_size or self.height() < min_size
 
-    def move(self, dx: float, dy: float, img_w: int, img_h: int) -> None:
+    def move(self, dx, dy, img_w, img_h) -> None:
         x_min, y_min, x_max, y_max = self.rect()
         box_w = x_max - x_min
         box_h = y_max - y_min
@@ -341,7 +240,7 @@ class Box:
         self.x2 = new_x_min + box_w
         self.y2 = new_y_min + box_h
 
-    def clamp(self, img_w: int, img_h: int) -> None:
+    def clamp(self, img_w, img_h) -> None:
         self.x1 = max(0, min(img_w - 1, self.x1))
         self.y1 = max(0, min(img_h - 1, self.y1))
         self.x2 = max(0, min(img_w - 1, self.x2))
@@ -357,21 +256,23 @@ class ImageCanvas(QLabel):
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
 
         self.main_window = None
-        self.base_pixmap: Optional[QPixmap] = None
-        self.display_pixmap: Optional[QPixmap] = None
+
+        self.base_pixmap = None
+        self.display_pixmap = None
 
         self.scale = 1.0
         self.offset_x = 0
         self.offset_y = 0
 
         self.mode = "idle"
-        self.resize_handle: Optional[str] = None
+        self.crop_mode_enabled = False
+        self.resize_handle = None
 
-        self.start_widget_point: Optional[QPointF] = None
-        self.current_widget_point: Optional[QPointF] = None
-        self.last_img_point: Optional[Tuple[float, float]] = None
+        self.start_widget_point = None
+        self.current_widget_point = None
+        self.last_img_point = None
 
-        self.original_box_before_edit: Optional[Box] = None
+        self.original_box_before_edit = None
 
     def set_main_window(self, window):
         self.main_window = window
@@ -379,6 +280,11 @@ class ImageCanvas(QLabel):
     def set_image(self, qpixmap: QPixmap):
         self.base_pixmap = qpixmap
         self.update_scaled_pixmap()
+
+    def clear_image(self):
+        self.base_pixmap = None
+        self.display_pixmap = None
+        self.clear()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -410,46 +316,34 @@ class ImageCanvas(QLabel):
         painter.drawPixmap(self.offset_x, self.offset_y, self.display_pixmap)
 
         if self.main_window is not None:
-            self.main_window.draw_boxes(
-                painter,
-                self.scale,
-                self.offset_x,
-                self.offset_y,
-            )
+            self.main_window.draw_boxes(painter, self.scale, self.offset_x, self.offset_y)
 
-        if self.mode == "drawing" and self.start_widget_point and self.current_widget_point:
-            draft_color = CLASS_COLORS.get(
-                self.main_window.current_class_id,
-                QColor(255, 255, 255),
-            )
+        if self.mode in ("drawing", "crop") and self.start_widget_point and self.current_widget_point:
+            if self.mode == "crop":
+                draft_color = QColor(0, 255, 255)
+            else:
+                draft_color = CLASS_COLORS.get(
+                    self.main_window.current_class_id,
+                    QColor(255, 255, 255),
+                )
 
-            pen = QPen(draft_color, 2, Qt.DashLine)
-            painter.setPen(pen)
+            painter.setPen(QPen(draft_color, 2, Qt.DashLine))
             painter.setBrush(Qt.NoBrush)
 
-            rect = QRectF(
-                self.start_widget_point,
-                self.current_widget_point,
-            ).normalized()
-
+            rect = QRectF(self.start_widget_point, self.current_widget_point).normalized()
             painter.drawRect(rect)
 
         painter.end()
         self.setPixmap(canvas)
 
-    def widget_to_image(self, point: QPointF) -> Optional[Tuple[float, float]]:
+    def widget_to_image(self, point: QPointF):
         if self.base_pixmap is None or self.display_pixmap is None:
             return None
 
         x = point.x() - self.offset_x
         y = point.y() - self.offset_y
 
-        if (
-            x < 0
-            or y < 0
-            or x > self.display_pixmap.width()
-            or y > self.display_pixmap.height()
-        ):
+        if x < 0 or y < 0 or x > self.display_pixmap.width() or y > self.display_pixmap.height():
             return None
 
         return x / self.scale, y / self.scale
@@ -470,6 +364,11 @@ class ImageCanvas(QLabel):
         self.start_widget_point = widget_pos
         self.current_widget_point = widget_pos
         self.last_img_point = img_pos
+
+        if self.crop_mode_enabled:
+            self.mode = "crop"
+            self.update_scaled_pixmap()
+            return
 
         handle = self.main_window.get_handle_at(*img_pos)
 
@@ -498,6 +397,7 @@ class ImageCanvas(QLabel):
         self.mode = "drawing"
         self.resize_handle = None
         self.original_box_before_edit = None
+
         self.update_scaled_pixmap()
 
     def mouseMoveEvent(self, event):
@@ -507,7 +407,7 @@ class ImageCanvas(QLabel):
         widget_pos = QPointF(event.position())
         img_pos = self.widget_to_image(widget_pos)
 
-        if self.mode == "drawing":
+        if self.mode in ("drawing", "crop"):
             self.current_widget_point = widget_pos
             self.update_scaled_pixmap()
             return
@@ -552,23 +452,6 @@ class ImageCanvas(QLabel):
             self.main_window.update_status(extra="Resizing box...")
             return
 
-        handle = self.main_window.get_handle_at(*img_pos)
-
-        if handle is not None:
-            self.setCursor(
-                Qt.SizeFDiagCursor
-                if handle[1] in ("tl", "br")
-                else Qt.SizeBDiagCursor
-            )
-            return
-
-        border_box_index = self.main_window.get_border_at(*img_pos)
-
-        if border_box_index is not None:
-            self.setCursor(Qt.SizeAllCursor)
-        else:
-            self.setCursor(Qt.ArrowCursor)
-
     def mouseReleaseEvent(self, event):
         if self.base_pixmap is None or self.main_window is None:
             return
@@ -576,14 +459,30 @@ class ImageCanvas(QLabel):
         if event.button() != Qt.LeftButton:
             return
 
+        if self.mode == "crop":
+            end_point = QPointF(event.position())
+
+            start_img = self.widget_to_image(self.start_widget_point) if self.start_widget_point else None
+            end_img = self.widget_to_image(end_point)
+
+            self.mode = "idle"
+            self.crop_mode_enabled = False
+
+            if start_img is not None and end_img is not None:
+                self.main_window.crop_current_image(start_img, end_img)
+            else:
+                self.main_window.update_status(extra="Crop cancelled.")
+
+            self.start_widget_point = None
+            self.current_widget_point = None
+            self.last_img_point = None
+            self.update_scaled_pixmap()
+            return
+
         if self.mode == "drawing":
             end_point = QPointF(event.position())
 
-            start_img = (
-                self.widget_to_image(self.start_widget_point)
-                if self.start_widget_point
-                else None
-            )
+            start_img = self.widget_to_image(self.start_widget_point) if self.start_widget_point else None
             end_img = self.widget_to_image(end_point)
 
             if start_img is not None and end_img is not None:
@@ -607,10 +506,8 @@ class ImageCanvas(QLabel):
 
                 if box.is_too_small():
                     if self.original_box_before_edit is not None:
-                        self.main_window.boxes[self.main_window.selected_box_index] = (
-                            self.original_box_before_edit
-                        )
-                        self.main_window.update_status(extra="Edit cancelled: box too small.")
+                        self.main_window.boxes[self.main_window.selected_box_index] = self.original_box_before_edit
+                    self.main_window.update_status(extra="Edit cancelled: box too small.")
                 else:
                     self.main_window.update_status(extra="Box updated.")
 
@@ -621,7 +518,6 @@ class ImageCanvas(QLabel):
         self.last_img_point = None
         self.original_box_before_edit = None
 
-        self.setCursor(Qt.ArrowCursor)
         self.update_scaled_pixmap()
 
 
@@ -632,19 +528,19 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("Water Meter YOLO Labeler")
         self.resize(1280, 850)
 
-        self.image_dir: Optional[str] = None
-        self.label_dir: Optional[str] = None
-        self.image_files: List[str] = []
+        self.image_dir = None
+        self.label_dir = None
+        self.image_files = []
         self.current_index = 0
 
         self.current_image = None
         self.current_image_w = 0
         self.current_image_h = 0
 
-        self.boxes: List[Box] = []
-        self.selected_box_index: Optional[int] = None
+        self.boxes = []
+        self.selected_box_index = None
         self.current_class_id = 0
-        self.undo_stack: List[List[Box]] = []
+        self.undo_stack = []
 
         self.canvas = ImageCanvas()
         self.canvas.set_main_window(self)
@@ -664,8 +560,14 @@ class MainWindow(QMainWindow):
         save_btn = QPushButton("Save")
         save_btn.clicked.connect(self.save_labels)
 
-        undo_btn = QPushButton("Undo (Ctrl+Z)")
+        remove_btn = QPushButton("Remove Image")
+        remove_btn.clicked.connect(self.remove_current_image)
+
+        undo_btn = QPushButton("Undo")
         undo_btn.clicked.connect(self.undo)
+
+        crop_btn = QPushButton("Crop Image")
+        crop_btn.clicked.connect(self.enable_crop_mode)
 
         rot_left_btn = QPushButton("Rotate -15°")
         rot_left_btn.clicked.connect(lambda: self.rotate_current_image(-15))
@@ -684,7 +586,9 @@ class MainWindow(QMainWindow):
         top_bar.addWidget(prev_btn)
         top_bar.addWidget(next_btn)
         top_bar.addWidget(save_btn)
+        top_bar.addWidget(remove_btn)
         top_bar.addWidget(undo_btn)
+        top_bar.addWidget(crop_btn)
         top_bar.addWidget(rot_left_btn)
         top_bar.addWidget(rot_right_btn)
         top_bar.addWidget(rot_90_btn)
@@ -713,18 +617,26 @@ class MainWindow(QMainWindow):
         save_action.setShortcut(QKeySequence.Save)
         save_action.triggered.connect(self.save_labels)
 
+        remove_action = QAction("Remove Image", self)
+        remove_action.setShortcut(QKeySequence("Ctrl+D"))
+        remove_action.triggered.connect(self.remove_current_image)
+
         undo_action = QAction("Undo", self)
         undo_action.setShortcut(QKeySequence.Undo)
         undo_action.triggered.connect(self.undo)
 
-        menubar = self.menuBar()
+        crop_action = QAction("Crop Image", self)
+        crop_action.setShortcut(QKeySequence("C"))
+        crop_action.triggered.connect(self.enable_crop_mode)
 
-        file_menu = menubar.addMenu("File")
+        file_menu = self.menuBar().addMenu("File")
         file_menu.addAction(open_action)
         file_menu.addAction(save_action)
+        file_menu.addAction(remove_action)
 
-        edit_menu = menubar.addMenu("Edit")
+        edit_menu = self.menuBar().addMenu("Edit")
         edit_menu.addAction(undo_action)
+        edit_menu.addAction(crop_action)
 
     def create_shortcuts(self):
         shortcuts = [
@@ -733,6 +645,8 @@ class MainWindow(QMainWindow):
             ("Undo", "Ctrl+Z", self.undo),
             ("Next", "N", self.next_image),
             ("Prev", "P", self.prev_image),
+            ("RemoveImage", "Ctrl+D", self.remove_current_image),
+            ("CropImage", "C", self.enable_crop_mode),
             ("RotateMinus15", "Ctrl+Left", lambda: self.rotate_current_image(-15)),
             ("RotatePlus15", "Ctrl+Right", lambda: self.rotate_current_image(15)),
             ("Rotate90", "R", lambda: self.rotate_current_image(90)),
@@ -756,58 +670,66 @@ class MainWindow(QMainWindow):
         ]
 
         for name, shortcut, slot in shortcuts:
-            self.addAction(self._make_action(name, shortcut, slot))
+            action = QAction(name, self)
+            action.setShortcut(QKeySequence(shortcut))
+            action.triggered.connect(slot)
+            self.addAction(action)
 
-    def _make_action(self, name: str, shortcut: str, slot):
-        action = QAction(name, self)
-        action.setShortcut(QKeySequence(shortcut))
-        action.triggered.connect(slot)
-        return action
+    def enable_crop_mode(self):
+        if self.current_image is None:
+            self.update_status(extra="Open an image first.")
+            return
+
+        self.canvas.crop_mode_enabled = True
+        self.canvas.mode = "idle"
+        self.selected_box_index = None
+        self.canvas.update_scaled_pixmap()
+        self.update_status(extra="Crop mode enabled. Draw a rectangle around the useful meter area.")
 
     def open_folder(self):
         start_folder = self.image_dir if self.image_dir else os.getcwd()
 
-        dialog = QFileDialog(self, "Select Image Folder", start_folder)
-        dialog.setFileMode(QFileDialog.Directory)
-        dialog.setOption(QFileDialog.ShowDirsOnly, True)
-        dialog.setOption(QFileDialog.DontUseNativeDialog, True)
+        folder = QFileDialog.getExistingDirectory(
+            self,
+            "Select Image Folder",
+            start_folder,
+            QFileDialog.ShowDirsOnly | QFileDialog.DontUseNativeDialog,
+        )
 
-        if dialog.exec() != QFileDialog.Accepted:
+        if not folder:
             return
-
-        selected = dialog.selectedFiles()
-
-        if not selected:
-            return
-
-        folder = selected[0]
 
         image_files = list_image_files(folder)
 
         if not image_files:
-            QMessageBox.information(
+            safe_message(
                 self,
-                "No Images in This Folder",
-                "This folder has no supported images.\n\n"
-                "Please open the folder that directly contains the images.",
+                "No Images",
+                "This folder has no supported images.\n\nPlease open the folder that directly contains the images.",
             )
             return
 
         self.image_dir = folder
 
         parent_dir = os.path.dirname(folder)
-        grandparent_dir = os.path.dirname(parent_dir)
-
-        self.label_dir = os.path.join(grandparent_dir, "labels")
+        self.label_dir = os.path.join(parent_dir, "labels")
         os.makedirs(self.label_dir, exist_ok=True)
 
         self.image_files = image_files
         self.current_index = 0
+
         self.load_current_image()
+        self.update_status(extra=f"Images: {self.image_dir} | Labels: {self.label_dir}")
+
+    def current_label_path(self):
+        if not self.label_dir or not self.image_files:
+            return None
+
+        stem = os.path.splitext(self.image_files[self.current_index])[0]
+        return os.path.join(self.label_dir, f"{stem}.txt")
 
     def push_undo_state(self):
         self.undo_stack.append([box.copy() for box in self.boxes])
-
         if len(self.undo_stack) > 200:
             self.undo_stack.pop(0)
 
@@ -823,6 +745,7 @@ class MainWindow(QMainWindow):
 
     def clear_selection(self):
         self.selected_box_index = None
+        self.canvas.crop_mode_enabled = False
         self.canvas.update_scaled_pixmap()
         self.update_status(extra="Selection cleared.")
 
@@ -834,7 +757,13 @@ class MainWindow(QMainWindow):
         image = cv2.imread(image_path)
 
         if image is None:
-            QMessageBox.critical(self, "Error", f"Failed to load image:\n{image_path}")
+            self.canvas.clear_image()
+            self.current_image = None
+            self.current_image_w = 0
+            self.current_image_h = 0
+            self.boxes = []
+            self.selected_box_index = None
+            self.update_status(extra=f"Failed to load image: {self.image_files[self.current_index]}")
             return
 
         self.current_image = image
@@ -855,80 +784,11 @@ class MainWindow(QMainWindow):
         self.undo_stack = []
         self.boxes = []
         self.selected_box_index = None
+        self.canvas.crop_mode_enabled = False
 
         self.canvas.set_image(pixmap)
         self.load_labels()
         self.update_status()
-
-    def reload_current_image_after_edit(self):
-        self.undo_stack = []
-        self.boxes = []
-        self.selected_box_index = None
-        self.load_current_image()
-
-    def rotate_current_image(self, angle_degrees: float):
-        if not self.image_dir or not self.image_files:
-            return
-
-        image_path = os.path.join(self.image_dir, self.image_files[self.current_index])
-
-        if self.boxes:
-            reply = QMessageBox.question(
-                self,
-                "Rotate Image",
-                "This image already has labels.\n\n"
-                "Rotating it will clear the current boxes because their positions will no longer match.\n\n"
-                "Continue?",
-                QMessageBox.Yes | QMessageBox.No,
-                QMessageBox.No,
-            )
-
-            if reply != QMessageBox.Yes:
-                self.update_status(extra="Rotation cancelled.")
-                return
-
-        image = cv2.imread(image_path)
-
-        if image is None:
-            QMessageBox.critical(self, "Rotation Error", f"Could not read image:\n{image_path}")
-            return
-
-        rotated = rotate_image_keep_all(image, angle_degrees)
-        ok = cv2.imwrite(image_path, rotated)
-
-        if not ok:
-            QMessageBox.critical(self, "Rotation Error", f"Could not save rotated image:\n{image_path}")
-            return
-
-        label_path = self.current_label_path()
-
-        if label_path and os.path.exists(label_path):
-            with open(label_path, "w", encoding="utf-8") as f:
-                f.write("")
-
-        self.reload_current_image_after_edit()
-        self.update_status(extra=f"Image rotated by {angle_degrees}° and saved.")
-
-    def rotate_custom_angle(self):
-        angle, ok = QInputDialog.getDouble(
-            self,
-            "Rotate Image",
-            "Enter rotation angle in degrees:",
-            0.0,
-            -360.0,
-            360.0,
-            2,
-        )
-
-        if ok:
-            self.rotate_current_image(angle)
-
-    def current_label_path(self) -> Optional[str]:
-        if not self.label_dir or not self.image_files:
-            return None
-
-        stem = os.path.splitext(self.image_files[self.current_index])[0]
-        return os.path.join(self.label_dir, f"{stem}.txt")
 
     def load_labels(self):
         self.boxes = []
@@ -967,7 +827,7 @@ class MainWindow(QMainWindow):
                     self.boxes.append(box)
 
         except Exception as e:
-            QMessageBox.warning(self, "Label Load Error", f"Could not load labels:\n{e}")
+            self.update_status(extra=f"Label load error: {e}")
 
         self.canvas.update_scaled_pixmap()
 
@@ -996,7 +856,182 @@ class MainWindow(QMainWindow):
             self.update_status(extra="Saved.")
 
         except Exception as e:
-            QMessageBox.critical(self, "Save Error", f"Could not save labels:\n{e}")
+            self.update_status(extra=f"Save error: {e}")
+
+    def clear_label_file(self):
+        label_path = self.current_label_path()
+
+        if label_path and os.path.exists(label_path):
+            with open(label_path, "w", encoding="utf-8") as f:
+                f.write("")
+
+    def crop_current_image(self, start_img, end_img):
+        if not self.image_dir or not self.image_files:
+            return
+
+        image_path = os.path.join(self.image_dir, self.image_files[self.current_index])
+
+        if self.boxes:
+            confirmed = safe_confirm(
+                self,
+                "Crop Image",
+                (
+                    "This image already has labels.\n\n"
+                    "Cropping it will clear the current boxes because their positions will no longer match.\n\n"
+                    "Continue?"
+                ),
+                yes_text="Yes, Crop",
+                no_text="Cancel",
+            )
+
+            if not confirmed:
+                self.update_status(extra="Cropping cancelled.")
+                return
+
+        image = cv2.imread(image_path)
+
+        if image is None:
+            self.update_status(extra=f"Could not read image: {image_path}")
+            return
+
+        x1, y1 = start_img
+        x2, y2 = end_img
+
+        cropped = crop_image(image, x1, y1, x2, y2)
+
+        if cropped is None:
+            self.update_status(extra="Invalid crop area.")
+            return
+
+        ok = cv2.imwrite(image_path, cropped)
+
+        if not ok:
+            self.update_status(extra=f"Could not save cropped image: {image_path}")
+            return
+
+        self.clear_label_file()
+        self.load_current_image()
+        self.update_status(extra="Image cropped and saved. Labels cleared.")
+
+    def remove_current_image(self):
+        if not self.image_dir or not self.image_files:
+            return
+
+        image_name = self.image_files[self.current_index]
+        image_path = os.path.join(self.image_dir, image_name)
+        label_path = self.current_label_path()
+
+        confirmed = safe_confirm(
+            self,
+            "Remove Image",
+            (
+                "Remove this image from the dataset?\n\n"
+                f"{image_name}\n\n"
+                "The image and its matching label file will be moved safely to:\n"
+                "removed_images/ and removed_labels/"
+            ),
+            yes_text="Yes, Remove",
+            no_text="Cancel",
+        )
+
+        if not confirmed:
+            self.update_status(extra="Image removal cancelled.")
+            return
+
+        dataset_root = os.path.dirname(self.image_dir)
+
+        removed_images_dir = os.path.join(dataset_root, "removed_images")
+        removed_labels_dir = os.path.join(dataset_root, "removed_labels")
+
+        os.makedirs(removed_images_dir, exist_ok=True)
+        os.makedirs(removed_labels_dir, exist_ok=True)
+
+        try:
+            self.canvas.clear_image()
+            self.current_image = None
+            self.current_image_w = 0
+            self.current_image_h = 0
+            self.boxes = []
+            self.selected_box_index = None
+            self.undo_stack = []
+
+            if os.path.exists(image_path):
+                image_destination = unique_destination_path(os.path.join(removed_images_dir, image_name))
+                shutil.move(image_path, image_destination)
+
+            if label_path and os.path.exists(label_path):
+                label_destination = unique_destination_path(os.path.join(removed_labels_dir, os.path.basename(label_path)))
+                shutil.move(label_path, label_destination)
+
+            del self.image_files[self.current_index]
+
+            if not self.image_files:
+                self.current_index = 0
+                self.update_status(extra="Removed image. No images left.")
+                return
+
+            if self.current_index >= len(self.image_files):
+                self.current_index = len(self.image_files) - 1
+
+            self.load_current_image()
+            self.update_status(extra=f"Removed image: {image_name}")
+
+        except Exception as e:
+            self.update_status(extra=f"Remove error: {e}")
+
+    def rotate_current_image(self, angle_degrees: float):
+        if not self.image_dir or not self.image_files:
+            return
+
+        image_path = os.path.join(self.image_dir, self.image_files[self.current_index])
+
+        if self.boxes:
+            confirmed = safe_confirm(
+                self,
+                "Rotate Image",
+                (
+                    "This image already has labels.\n\n"
+                    "Rotating it will clear the current boxes because their positions will no longer match.\n\n"
+                    "Continue?"
+                ),
+                yes_text="Yes, Rotate",
+                no_text="Cancel",
+            )
+
+            if not confirmed:
+                self.update_status(extra="Rotation cancelled.")
+                return
+
+        image = cv2.imread(image_path)
+
+        if image is None:
+            self.update_status(extra=f"Could not read image: {image_path}")
+            return
+
+        rotated = rotate_image_keep_size_crop_edges(image, angle_degrees)
+        ok = cv2.imwrite(image_path, rotated)
+
+        if not ok:
+            self.update_status(extra=f"Could not save rotated image: {image_path}")
+            return
+
+        self.clear_label_file()
+        self.load_current_image()
+        self.update_status(extra=f"Image rotated by {angle_degrees}° and saved. Labels cleared.")
+
+    def rotate_custom_angle(self):
+        angle, ok = QInputDialog.getDouble(
+            self,
+            "Rotate Image",
+            "Enter rotation angle in degrees:",
+            0.0,
+            -360.0,
+            360.0,
+            2,
+        )
+
+        if ok:
+            self.rotate_current_image(angle)
 
     def next_image(self):
         if not self.image_files:
@@ -1020,11 +1055,9 @@ class MainWindow(QMainWindow):
 
     def set_class(self, class_id: int):
         self.current_class_id = class_id
+        self.canvas.crop_mode_enabled = False
 
-        if (
-            self.selected_box_index is not None
-            and 0 <= self.selected_box_index < len(self.boxes)
-        ):
+        if self.selected_box_index is not None and 0 <= self.selected_box_index < len(self.boxes):
             if self.boxes[self.selected_box_index].class_id != class_id:
                 self.push_undo_state()
                 self.boxes[self.selected_box_index].class_id = class_id
@@ -1046,14 +1079,13 @@ class MainWindow(QMainWindow):
             self.canvas.update_scaled_pixmap()
             self.update_status(extra="Box deleted.")
 
-    def find_box_at(self, x: float, y: float) -> Optional[int]:
+    def find_box_at(self, x, y):
         for i in range(len(self.boxes) - 1, -1, -1):
             if self.boxes[i].contains(x, y):
                 return i
-
         return None
 
-    def get_handle_at(self, x: float, y: float) -> Optional[Tuple[int, str]]:
+    def get_handle_at(self, x, y):
         tolerance = max(6, HANDLE_SIZE / max(self.canvas.scale, 1e-6))
 
         for i in range(len(self.boxes) - 1, -1, -1):
@@ -1073,7 +1105,7 @@ class MainWindow(QMainWindow):
 
         return None
 
-    def get_border_at(self, x: float, y: float) -> Optional[int]:
+    def get_border_at(self, x, y):
         tolerance = max(6, HANDLE_SIZE / max(self.canvas.scale, 1e-6))
 
         for i in range(len(self.boxes) - 1, -1, -1):
@@ -1102,18 +1134,12 @@ class MainWindow(QMainWindow):
             color = CLASS_COLORS.get(box.class_id, QColor(255, 255, 255))
             pen_width = 3 if i == self.selected_box_index else 2
 
-            pen = QPen(color, pen_width)
-            painter.setPen(pen)
+            painter.setPen(QPen(color, pen_width))
             painter.setBrush(Qt.NoBrush)
             painter.drawRect(QRectF(QPointF(x1, y1), QPointF(x2, y2)))
 
             label_text = CLASS_NAMES[box.class_id]
-
-            if label_text in ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"]:
-                text_width = 22
-            else:
-                text_width = len(label_text) * 8 + 12
-
+            text_width = 22 if label_text in list("0123456789") else len(label_text) * 8 + 12
             text_height = 20
             label_top = max(0, int(y1) - text_height)
 
@@ -1122,8 +1148,7 @@ class MainWindow(QMainWindow):
             painter.drawText(int(x1) + 5, label_top + 15, label_text)
 
             if i == self.selected_box_index:
-                handle_brush = QBrush(QColor(255, 255, 255))
-                painter.setBrush(handle_brush)
+                painter.setBrush(QBrush(QColor(255, 255, 255)))
                 painter.setPen(QPen(Qt.black, 1))
 
                 handles = [
@@ -1139,10 +1164,10 @@ class MainWindow(QMainWindow):
     def update_status(self, extra: str = ""):
         shortcuts_text = (
             "M=meter | W=window | 0..9=digit classes | U=unknown | "
-            "N=next | P=previous | R=rotate 90° | "
+            "C=crop image | N=next | P=previous | R=rotate 90° | "
             "Ctrl+Left=-15° | Ctrl+Right=+15° | Ctrl+R=custom rotate | "
             "Border drag=move box | Corner drag=resize | Inside click=select | "
-            "Delete=delete | Ctrl+Z=undo | Esc=clear selection"
+            "Delete=delete box | Ctrl+D=remove image | Ctrl+Z=undo | Esc=clear selection"
         )
 
         if not self.image_files:
@@ -1155,10 +1180,7 @@ class MainWindow(QMainWindow):
         selected_text = "None"
 
         if self.selected_box_index is not None and 0 <= self.selected_box_index < len(self.boxes):
-            selected_text = (
-                f"{self.selected_box_index} "
-                f"({CLASS_NAMES[self.boxes[self.selected_box_index].class_id]})"
-            )
+            selected_text = f"{self.selected_box_index} ({CLASS_NAMES[self.boxes[self.selected_box_index].class_id]})"
 
         status = (
             f"Image {self.current_index + 1}/{len(self.image_files)}: {image_name} | "
@@ -1171,6 +1193,7 @@ class MainWindow(QMainWindow):
             status += f" | {extra}"
 
         status += "\n" + shortcuts_text
+
         self.info_label.setText(status)
 
     def closeEvent(self, event):
